@@ -1,17 +1,42 @@
 # Why: keep secrets, build artifacts, and large media out of git.
+
+# Environment & Secrets
 .env
+.env.local
+.env.*.local
 
-data/
-
+# Python
 **/__pycache__/
 **/*.pyc
+**/*.pyo
+**/*.pyd
 **/.pytest_cache/
 **/.mypy_cache/
+**/.coverage
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+ENV/
+env/
 
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
+# Logs & Data
 *.log
 *.jsonl
+
+# Large media & temporary files
+models/
+output/
+temp/
+piper/
+input/footage/
+data/
 
