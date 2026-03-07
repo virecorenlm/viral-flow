@@ -1,0 +1,17 @@
+# Why: keep secrets, build artifacts, and large media out of git.
+.env
+
+data/
+
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.mypy_cache/
+
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+*.log
+*.jsonl
+

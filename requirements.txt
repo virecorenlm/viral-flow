@@ -1,0 +1,11 @@
+gradio>=4.0.0
+moviepy==1.0.3
+librosa>=0.10.0
+pydub>=0.25.1
+ollama>=0.2.0
+Pillow>=10.0.0
+numpy>=1.24.0
+structlog>=23.0.0
+python-dotenv>=1.0.0
+tqdm>=4.65.0
+
