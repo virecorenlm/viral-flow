@@ -28,6 +28,7 @@ from src.audio_gen import generate_narration_audio
 from src.config import FOOTAGE_DIR, INPUT_DIR, OUTPUT_DIR, TEMP_DIR
 from src.ollama_client import OllamaClient
 from src.scene_analyzer import analyze_footage
+from src.script_writer import generate_script_from_footage
 from src.video_logic import render_from_plan
 
 
@@ -97,25 +98,30 @@ def _clean_temp(temp_dir: Path) -> None:
     temp_dir.mkdir(parents=True, exist_ok=True)
 
 
-def _copy_inputs(script_file: Any, footage_files: List[Any]) -> Tuple[Path, Path]:
+def _copy_inputs(
+    script_file: Any,
+    footage_files: List[Any],
+) -> Tuple[Optional[Path], Path]:
     """
-    Copy uploaded script and footage into the project input folders.
+    Copy uploaded footage (required) and optional script into project input folders.
 
     Parameters:
-        script_file: Gradio File object
-        footage_files: List of Gradio File objects
+        script_file: Gradio File object, or None when auto-generating from footage
+        footage_files: List of Gradio File objects (.mp4)
 
     Returns:
-        (script_path, footage_dir)
+        (script_path or None, footage_dir)
+        script_path is None when no script was uploaded — caller must auto-generate.
     """
     # Why: Keep the pipeline file-path based and predictable, independent of upload temp paths.
     _ensure_dirs()
-    script_src = Path(getattr(script_file, "name", str(script_file)))
-    if not script_src.exists():
-        raise FileNotFoundError("Script upload path not found.")
 
-    script_dst = INPUT_DIR / "script.txt"
-    shutil.copyfile(script_src, script_dst)
+    script_dst: Optional[Path] = None
+    if script_file is not None:
+        script_src = Path(getattr(script_file, "name", str(script_file)))
+        if script_src.exists():
+            script_dst = INPUT_DIR / "script.txt"
+            shutil.copyfile(script_src, script_dst)
 
     # Clear old footage then copy new clips.
     for old in FOOTAGE_DIR.glob("*.mp4"):
@@ -153,7 +159,7 @@ def _format_status(steps: Dict[str, str]) -> str:
     """
     # Why: Keep the UI readable and predictable during long renders.
     order = [
-        "Script loaded",
+        "Generating script",
         "Generating voiceover",
         "Analyzing footage",
         "AI Director planning cuts",
@@ -190,7 +196,7 @@ def _pipeline_worker(
         None
     """
     steps = {k: "○" for k in [
-        "Script loaded",
+        "Generating script",
         "Generating voiceover",
         "Analyzing footage",
         "AI Director planning cuts",
@@ -204,41 +210,70 @@ def _pipeline_worker(
 
     try:
         _clean_temp(TEMP_DIR)
-        steps["Cleanup"] = "○"
 
-        steps["Script loaded"] = "⟳"
-        push()
-        script_path, _ = _copy_inputs(script_file, footage_files)
-        script_text = script_path.read_text(encoding="utf-8").strip()
-        if not script_text:
-            raise ValueError("Script is empty after upload.")
-        steps["Script loaded"] = "✓"
-        push()
-
-        steps["Generating voiceover"] = "⟳"
-        push()
-        audio_data = generate_narration_audio(script_text=script_text, output_wav_path=TEMP_DIR / "narration.wav")
-        steps["Generating voiceover"] = "✓"
-        push()
-
-        steps["Analyzing footage"] = "⟳"
-        push()
-        client = OllamaClient()
-        clip_metadata = analyze_footage(footage_dir=FOOTAGE_DIR, temp_dir=TEMP_DIR, ollama_client=client)
-        steps["Analyzing footage"] = "✓"
-        push()
-
-        steps["AI Director planning cuts"] = "⟳"
-        push()
-
-        # Max length mapping.
-        max_len = None
+        # Max length mapping (needed early for script word-count targeting).
+        max_len: Optional[float] = None
         if max_length == "30s":
             max_len = 30.0
         elif max_length == "60s":
             max_len = 60.0
         elif max_length == "90s":
             max_len = 90.0
+
+        script_path, _ = _copy_inputs(script_file, footage_files)
+        client = OllamaClient()
+        clip_metadata = None  # May be pre-populated when auto-generating the script.
+
+        if script_path is None:
+            # ── AUTO-GENERATE MODE ───────────────────────────────────────────────
+            # Vision model pre-watches footage → creative model writes narration.
+            # analyze_footage() runs inside generate_script_from_footage() and its
+            # clip_metadata is returned so we DON'T call the vision model twice.
+            steps["Generating script"] = "⟳"
+            push()
+            script_text, clip_metadata = generate_script_from_footage(
+                footage_dir=FOOTAGE_DIR,
+                temp_dir=TEMP_DIR,
+                ollama_client=client,
+                style=style,
+                platform=platform,
+                max_length_seconds=max_len or 60.0,
+                save_to=INPUT_DIR / "script.txt",
+            )
+            steps["Generating script"] = "✓"
+            steps["Analyzing footage"] = "✓"  # Already done inside script generation.
+            push()
+        else:
+            # ── USER-PROVIDED SCRIPT MODE ────────────────────────────────────────
+            script_text = script_path.read_text(encoding="utf-8").strip()
+            if not script_text:
+                raise ValueError("Script is empty after upload.")
+            steps["Generating script"] = "✓"
+            push()
+
+        steps["Generating voiceover"] = "⟳"
+        push()
+        audio_data = generate_narration_audio(
+            script_text=script_text,
+            output_wav_path=TEMP_DIR / "narration.wav",
+        )
+        steps["Generating voiceover"] = "✓"
+        push()
+
+        if clip_metadata is None:
+            # Vision analysis hasn't run yet (user provided a script manually).
+            steps["Analyzing footage"] = "⟳"
+            push()
+            clip_metadata = analyze_footage(
+                footage_dir=FOOTAGE_DIR,
+                temp_dir=TEMP_DIR,
+                ollama_client=client,
+            )
+            steps["Analyzing footage"] = "✓"
+            push()
+
+        steps["AI Director planning cuts"] = "⟳"
+        push()
 
         # Render does director+captions internally; we set statuses around it.
         steps["AI Director planning cuts"] = "✓"
@@ -378,7 +413,10 @@ def build_ui() -> Any:
         )
 
         with gr.Row():
-            script_file = gr.File(label="DROP SCRIPT.TXT HERE", file_types=[".txt"])
+            script_file = gr.File(
+                label="DROP SCRIPT.TXT (optional — leave blank to auto-write from footage)",
+                file_types=[".txt"],
+            )
             footage_files = gr.Files(label="DROP FOOTAGE FILES HERE (.mp4)", file_types=[".mp4"])
 
         with gr.Row():
@@ -390,7 +428,7 @@ def build_ui() -> Any:
 
         status_box = gr.Textbox(
             label="PIPELINE STATUS",
-            value="PIPELINE STATUS:\n○ Script loaded\n○ Generating voiceover\n○ Analyzing footage\n○ AI Director planning cuts\n○ Rendering video\n○ Burning captions\n○ Cleanup",
+            value="PIPELINE STATUS:\n○ Generating script\n○ Generating voiceover\n○ Analyzing footage\n○ AI Director planning cuts\n○ Rendering video\n○ Burning captions\n○ Cleanup",
             lines=10,
             elem_classes=["vf-status"],
         )
