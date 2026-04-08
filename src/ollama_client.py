@@ -177,6 +177,79 @@ class OllamaClient:
         ]
         return self.chat_json(self.models.director, messages)
 
+    def write_script(
+        self,
+        clip_metadata: List[Dict[str, Any]],
+        style: str = "Outdoorsy",
+        platform: str = "TikTok",
+        max_length_seconds: float = 60.0,
+    ) -> str:
+        """
+        Ask the Creative model to write a narration script from footage analysis.
+
+        Called after scene_analyzer.analyze_footage() so the model has structured
+        per-frame descriptions to work from instead of raw video.
+
+        Parameters:
+            clip_metadata: Output from scene_analyzer.analyze_footage()
+            style: Content style label (Outdoorsy|Hype|Calm)
+            platform: Target platform (TikTok|Reels|Shorts)
+            max_length_seconds: Target length — determines approximate word count
+
+        Returns:
+            Plain narration text (not JSON) ready to feed directly into Piper TTS.
+        """
+        # Why: ~150 WPM is a comfortable narration pace for short-form video.
+        target_words = int(max_length_seconds * 2.5)
+
+        # Compact summary so the prompt isn't bloated with full frame dicts.
+        footage_summary = []
+        for clip in clip_metadata:
+            footage_summary.append({
+                "clip": clip["clip_filename"],
+                "duration_s": round(clip["duration_seconds"], 1),
+                "dominant_scene": clip["dominant_scene_type"],
+                "avg_energy": round(clip["avg_visual_energy"], 1),
+                "scenes": [
+                    {
+                        "scene_type": f["scene_type"],
+                        "subject": f["subject"],
+                        "energy": f["visual_energy"],
+                        "best_for": f["best_for"],
+                    }
+                    for f in clip.get("frames", [])
+                ],
+            })
+
+        system = (
+            "You are a scriptwriter for viral fishing short-form video for Shorette's Bait and Tackle.\n"
+            f"Style: {style.lower()}. Platform: {platform}. Target narration: ~{target_words} words.\n"
+            "\nScript rules:\n"
+            "- First sentence must be a hook (exciting question, bold claim, or dramatic moment)\n"
+            "- Reference actual visual moments from the footage (catches, lures, casts, water)\n"
+            "- Use natural, conversational fishing language — not corporate, not cringe\n"
+            "- Match energy to visual_energy scores (high-energy scenes = punchy short sentences)\n"
+            "- End with a call to action: like, follow, or visit Shorette's\n"
+            f"- Keep word count close to {target_words} words for a {max_length_seconds:.0f}s video\n"
+            "- NO hashtags in the script. NO stage directions. NO headers. No explanations.\n"
+            "Return ONLY the narration script text."
+        )
+
+        messages = [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": (
+                    "The vision model analyzed this footage. "
+                    "Write a narration script based on what it saw:\n\n"
+                    + json.dumps(footage_summary, indent=2)
+                ),
+            },
+        ]
+        # Why: Script output is plain prose — we use chat() directly, not chat_json().
+        resp = self._client.chat(model=self.models.creative, messages=messages)
+        return (resp.get("message") or {}).get("content", "").strip()
+
     def write_captions(
         self,
         script: str,
